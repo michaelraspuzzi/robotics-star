@@ -86,7 +86,6 @@ aside .count{color:var(--muted);margin:0 0 10px;font-size:13px}
 .legend{color:var(--muted);font-size:12px;margin-top:12px;display:flex;flex-wrap:wrap;gap:4px 14px}
 .note{color:var(--muted);font-size:12px;margin-top:12px}
 @media (max-width:900px){.app{grid-template-columns:minmax(0,1fr);grid-template-rows:none;height:auto;min-height:0}.stage{height:68vh;min-height:420px}aside{max-height:none}}
-@media (max-width:900px){.stage{touch-action:pan-y}}
 @media (max-width:600px){.sub{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.app{padding-block:12px;gap:12px}.stage{height:62vh!important;min-height:380px}.chips{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}.chips::-webkit-scrollbar{display:none}.chip{flex:none}.sub{font-size:13.5px}h1{font-size:22px}}
 @media (prefers-reduced-motion:reduce){.chip,.lab,.tip{transition:none}}
 </style>
@@ -235,7 +234,7 @@ function spikeState(i) {
 
 // ================================================================ scene
 const stage = document.getElementById('stage');
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: /cap=1/.test(location.hash) });
+const renderer = new THREE.WebGLRenderer({ antialias: devicePixelRatio < 2, alpha: true, preserveDrawingBuffer: /cap=1/.test(location.hash) });
 renderer.setPixelRatio(Math.min(2, devicePixelRatio));
 stage.insertBefore(renderer.domElement, document.getElementById('labels'));
 const scene = new THREE.Scene();
@@ -288,8 +287,8 @@ function writeSpikes() {
   geo.attributes.position.needsUpdate = geo.attributes.color.needsUpdate = true;
   geo.computeVertexNormals(); geo.computeBoundingSphere();
   egeo.setDrawRange(0, e); egeo.attributes.position.needsUpdate = egeo.attributes.color.needsUpdate = true;
-  core.scale.setScalar(coreR); group.position.x = shift; group.position.y = 0;
 }
+function placeGroup() { core.scale.setScalar(coreR); group.position.x = shift; group.position.y = 0; }
 
 // ================================================================ transitions
 let mode = { level: 'all', fam: null, spike: -1 }, target = STATES.all, from = null, t0 = performance.now();
@@ -309,7 +308,7 @@ from = { core: coreR, shift: 0, spikes: S.map(s => ({ base: s.base.map(p => p.cl
 const slug = n => n.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const CAP = /cap=1/.test(location.hash);
 function go(level, fam = null, spike = -1) {
-  from = snapshot();
+  from = snapshot(); vx = vy = 0;
   mode = { level, fam, spike };
   target = level === 'all' ? STATES.all : level === 'fam' ? STATES[fam] : spikeState(spike);
   if (level !== 'sections') selSection = -1; else selSection = Math.max(0, sectionsOf(spike).length - 1);
@@ -321,8 +320,9 @@ function go(level, fam = null, spike = -1) {
   if (!CAP) try { history.replaceState(null, '', level === 'all' ? location.pathname + location.search : '#' + (level === 'fam' ? 'fam=' + fam : 't=' + slug(TER[spike].n) + (level === 'sections' ? '&open=1' : ''))); } catch (e) {}
 }
 let busy = false;
+let hlMoving = false;
 function stepAnim(now) {
-  let b = false;
+  let b = false; hlMoving = false;
   for (let i = 0; i < N; i++) {
     const a = Math.min(1, Math.max(0, (now - t0 - delay[i]) / DUR)); if (a < 1) b = true;
     const f = from.spikes[i], g = target.spikes[i], s = S[i];
@@ -335,7 +335,7 @@ function stepAnim(now) {
     s.apex.copy(ap.lerp(bc, (f.alpha > 0 && g.alpha > 0) ? retract : retract * .3));
     s.alpha = f.alpha + (g.alpha - f.alpha) * easeIO(a);
     const want = (mode.level === 'all' && hoverFam) ? (TER[i].f === hoverFam ? 1 : 0) : 1;
-    s.hl += (want - s.hl) * 0.12;
+    if (Math.abs(want - s.hl) > .002) { s.hl += (want - s.hl) * 0.12; hlMoving = true; } else s.hl = want;
   }
   const ga = easeIO(Math.min(1, (now - t0) / DUR));
   coreR = from.core + (target.core - from.core) * ga;
@@ -347,18 +347,31 @@ function stepAnim(now) {
 // ================================================================ interaction
 let dragging = false, moved = 0, lx = 0, ly = 0, spin = 0, lastInput = performance.now(), hoverFam = null, hovered = -1;
 const cv = renderer.domElement, tip = document.getElementById('tip');
-cv.addEventListener('pointerdown', e => { dragging = true; moved = 0; lx = e.clientX; ly = e.clientY; cv.setPointerCapture(e.pointerId); cv.classList.add('dragging'); });
+// drag rotates around screen axes; release keeps the flick going and lets it coast to a stop
+let vx = 0, vy = 0, lastMoveT = 0;
+const ROT = 0.008, _q = new THREE.Quaternion(), _e = new THREE.Euler();
+function rotateBy(ax, ay) { group.quaternion.premultiply(_q.setFromEuler(_e.set(ax, ay, 0))); qFrom.copy(group.quaternion); qTo.copy(group.quaternion); }
+const canSpin = () => mode.level === 'all' || mode.level === 'fam';
+cv.addEventListener('pointerdown', e => { if (!e.isPrimary) return; dragging = true; moved = 0; vx = vy = 0; lx = e.clientX; ly = e.clientY; lastMoveT = e.timeStamp; cv.setPointerCapture(e.pointerId); cv.classList.add('dragging'); });
 cv.addEventListener('pointermove', e => {
+  if (!e.isPrimary) return;
   if (dragging) {
     const dx = e.clientX - lx, dy = e.clientY - ly; lx = e.clientX; ly = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
-    if (mode.level === 'all' || mode.level === 'fam') {
-      group.quaternion.premultiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(e.pointerType === 'touch' ? 0 : dy * .008, dx * .008, 0)));
-      qFrom.copy(group.quaternion); qTo.copy(group.quaternion); lastInput = performance.now(); spin = 0;
+    if (canSpin()) {
+      rotateBy(dy * ROT, dx * ROT);
+      const dt = Math.max(4, e.timeStamp - lastMoveT); lastMoveT = e.timeStamp;
+      const cap = v => Math.max(-.006, Math.min(.006, v)); vx = cap(vx * .5 + (dy * ROT / dt) * .5); vy = cap(vy * .5 + (dx * ROT / dt) * .5);
+      lastInput = performance.now(); spin = 0;
     }
-  } else hover(e);
+  } else if (e.pointerType !== 'touch') hover(e);
 });
-cv.addEventListener('pointercancel', () => { dragging = false; cv.classList.remove('dragging'); });
-cv.addEventListener('pointerup', e => { dragging = false; cv.classList.remove('dragging'); if (moved < 6) click(e); });
+cv.addEventListener('pointercancel', () => { dragging = false; vx = vy = 0; cv.classList.remove('dragging'); });
+cv.addEventListener('pointerup', e => {
+  if (!e.isPrimary) return;
+  dragging = false; cv.classList.remove('dragging');
+  if (e.timeStamp - lastMoveT > 80 || reduce) vx = vy = 0; // finger rested before lifting: no flick
+  if (moved < (e.pointerType === 'touch' ? 12 : 6)) { vx = vy = 0; click(e); }
+});
 let clearT = null;
 function clearHoverSoon() { clearTimeout(clearT); clearT = setTimeout(() => { hoverFam = null; }, 900); }
 cv.addEventListener('pointerleave', e => { tip.style.opacity = 0; hovered = -1; hoverSection = -1; cv.classList.remove('pointing'); if (e.pointerType !== 'touch') clearHoverSoon(); });
@@ -561,14 +574,30 @@ const famLab = Object.fromEntries(famKeys.map(k => { const d = document.createEl
 terLab.forEach((d, i) => {
   d.addEventListener('mouseenter', () => { clearTimeout(clearT); if (mode.level === 'all') hoverFam = TER[i].f; });
   d.addEventListener('mouseleave', () => { if (mode.level === 'all') clearHoverSoon(); });
-  d.addEventListener('click', () => { if (+d.style.opacity > .5) go('spike', null, i); });
+  d.addEventListener('click', () => { if (d._o > .5) go('spike', null, i); });
 });
-famKeys.forEach(k => famLab[k].addEventListener('click', () => { if (+famLab[k].style.opacity > .5) go('fam', k); }));
+famKeys.forEach(k => famLab[k].addEventListener('click', () => { if (famLab[k]._o > .5) go('fam', k); }));
 const secLab = Array.from({ length: 6 }, (_, j) => { const d = document.createElement('div'); d.className = 'lab'; labelsEl.appendChild(d);
-  d.addEventListener('click', () => { if (+d.style.opacity > .5) selectSection(j); }); return d; });
+  d.addEventListener('click', () => { if (d._o > .5) selectSection(j); }); return d; });
 const ticks = Array.from({ length: 6 }, () => { const d = document.createElement('div'); d.className = 'lab tick'; labelsEl.appendChild(d); return d; });
 const titleLab = (() => { const d = document.createElement('div'); d.className = 'lab title'; labelsEl.appendChild(d); return d; })();
-function setLab(el, x, y, html, op, color) { el.style.left = x + 'px'; el.style.top = y + 'px'; el.style.opacity = op; if (color) el.style.color = color; if (el._h !== html) { el.innerHTML = html; el._h = html; } }
+// labels move every frame, so writes are skipped when nothing changed and sizes are measured only when content changes
+function setLab(el, x, y, html, op, color) {
+  if (!op) { if (el._o !== 0) { el.style.opacity = 0; el._o = 0; } return; }
+  if (el._h !== html) { el.innerHTML = html; el._h = html; el._sz = null; }
+  if (color && el._c !== color) { el.style.color = color; el._c = color; }
+  if (el._o !== op) { el.style.opacity = op; el._o = op; }
+  x = Math.round(x * 2) / 2; y = Math.round(y * 2) / 2;
+  if (el._x !== x) { el.style.left = x + 'px'; el._x = x; }
+  if (el._y !== y) { el.style.top = y + 'px'; el._y = y; }
+}
+function setCls(el, c) { if (el.className !== c) { el.className = c; el._sz = null; } }
+function labSize(el) { return el._sz || (el._sz = { w: el.offsetWidth, h: el.offsetHeight }); }
+const SVGNS = 'http://www.w3.org/2000/svg';
+under.innerHTML = `<defs><radialGradient id="soft"><stop offset="0" stop-color="#3a6ea5" stop-opacity="0.10"/><stop offset=".8" stop-color="#3a6ea5" stop-opacity="0.07"/><stop offset="1" stop-color="#3a6ea5" stop-opacity="0"/></radialGradient></defs>`;
+const shadowEl = under.appendChild(document.createElementNS(SVGNS, 'ellipse')), glowEl = under.appendChild(document.createElementNS(SVGNS, 'circle')), linesEl = under.appendChild(document.createElementNS(SVGNS, 'g'));
+shadowEl.setAttribute('fill', '#3a3428'); shadowEl.setAttribute('fill-opacity', '0.13'); glowEl.setAttribute('fill', 'url(#soft)');
+function setAttrs(el, a) { for (const k in a) { const v = typeof a[k] === 'number' ? Math.round(a[k] * 2) / 2 : a[k]; if (el['_' + k] !== v) { el.setAttribute(k, v); el['_' + k] = v; } } }
 function proj(v, w, h) { const p = v.clone().applyMatrix4(group.matrixWorld).project(camera); return [(p.x + 1) / 2 * w, (1 - p.y) / 2 * h]; }
 function facing(v) { return v.clone().normalize().applyQuaternion(group.quaternion).z; }
 function updateOverlay(w, h) {
@@ -578,10 +607,9 @@ function updateOverlay(w, h) {
   const tipsXY = S.map(s => proj(s.apex, w, h));
   S.forEach((s, i) => { if (s.alpha > .5) R = Math.max(R, Math.hypot(tipsXY[i][0] - cx, tipsXY[i][1] - cy)); });
   R = Math.max(R * 1.05, 60); if (!isFinite(R) || !isFinite(cx)) return;
-  under.setAttribute('viewBox', `0 0 ${w} ${h}`);
-  under.innerHTML = `<defs><radialGradient id="soft"><stop offset="0" stop-color="#3a6ea5" stop-opacity="0.10"/><stop offset=".8" stop-color="#3a6ea5" stop-opacity="0.07"/><stop offset="1" stop-color="#3a6ea5" stop-opacity="0"/></radialGradient></defs>
-    <ellipse cx="${cx}" cy="${cy + R * .98 + 22}" rx="${R * .5}" ry="${R * .045}" fill="#3a3428" fill-opacity="0.13"/>
-    <circle cx="${cx}" cy="${cy}" r="${R * 1.04}" fill="url(#soft)"/>`;
+  setAttrs(under, { viewBox: `0 0 ${w} ${h}` });
+  setAttrs(shadowEl, { cx, cy: cy + R * .98 + 22, rx: R * .5, ry: R * .045 });
+  setAttrs(glowEl, { cx, cy, r: R * 1.04 });
   const quiet = busy ? 0 : 1;
   // territory labels
   TER.forEach((t, i) => {
@@ -590,20 +618,21 @@ function updateOverlay(w, h) {
     if (mode.level === 'all' && hoverFam === t.f && fc > 0.05) { show = 1; html = t.n + (t.focus ? ' ★' : ''); }
     if (mode.level === 'fam' && t.f === mode.fam && fc > -0.25) { show = 1; cls = 'lab big'; html = `${t.n}${t.focus ? ' ★' : ''}<span class="ev">${STATUS[t.s]}</span>`; }
     const [x0, y0] = tipsXY[i], ang = Math.atan2(y0 - cy, x0 - cx), off = mode.level === 'fam' ? 34 : 18;
-    terLab[i].className = cls + (show && !busy ? ' click' : '');
+    setCls(terLab[i], cls + (show && !busy ? ' click' : ''));
+    if (!(show * quiet)) { setLab(terLab[i], 0, 0, terLab[i]._h || '', 0); return; }
     if (mode.level === 'fam' || (mode.level === 'all' && show)) {
       // family view and highlighted families: labels sit on a ring just outside the crystal, never on top of it
-      setLab(terLab[i], 0, 0, html, show * quiet, f.ink);
-      const lw = terLab[i].offsetWidth, lh = terLab[i].offsetHeight, rr = R * .98 + 8;
+      if (terLab[i]._h !== html) { terLab[i].innerHTML = html; terLab[i]._h = html; terLab[i]._sz = null; }
+      const { w: lw, h: lh } = labSize(terLab[i]), rr = R * .98 + 8;
       const lx = cx + Math.cos(ang) * (rr + lw / 2), ly = cy + Math.sin(ang) * (rr + lh / 2);
       setLab(terLab[i], Math.min(w - lw / 2 - 4, Math.max(lw / 2 + 4, lx)), Math.min(h - lh / 2 - 4, Math.max(lh / 2 + 4, ly)), html, show * quiet, f.ink);
     } else setLab(terLab[i], x0 + Math.cos(ang) * off, y0 + Math.sin(ang) * off, html, show * quiet, f.ink);
   });
   // nudge overlapping territory labels apart, top to bottom
-  const vis = terLab.filter(d => +d.style.opacity > .5).map(d => ({ d, x: parseFloat(d.style.left), y: parseFloat(d.style.top), w: d.offsetWidth, h: d.offsetHeight })).sort((a, b) => a.y - b.y);
+  const vis = terLab.filter(d => d._o > .5).map(d => ({ d, x: d._x, y: d._y, ...labSize(d) })).sort((a, b) => a.y - b.y);
   for (let a = 0; a < vis.length; a++) for (let b = a + 1; b < vis.length; b++) {
     const A = vis[a], B = vis[b];
-    if (Math.abs(A.x - B.x) < (A.w + B.w) / 2 - 4 && B.y - A.y < (A.h + B.h) / 2) { B.y = A.y + (A.h + B.h) / 2; B.d.style.top = B.y + 'px'; }
+    if (Math.abs(A.x - B.x) < (A.w + B.w) / 2 - 4 && B.y - A.y < (A.h + B.h) / 2) { B.y = A.y + (A.h + B.h) / 2; B.d.style.top = B.y + 'px'; B.d._y = B.y; }
   }
   // family labels (main star only)
   famKeys.forEach(k => {
@@ -611,9 +640,12 @@ function updateOverlay(w, h) {
     const avg = ids.reduce((a, i) => a.add(S[i].apex.clone().normalize()), V()).normalize();
     const fc = facing(avg), [x, y] = proj(avg.clone().multiplyScalar(CORE * 3.05), w, h);
     const show = mode.level === 'all' && !hoverFam && fc > -0.15 ? Math.min(1, (fc + .15) * 3) : (mode.level === 'all' && hoverFam === k ? 0 : 0);
-    famLab[k].className = 'lab fam' + (show * quiet > .5 ? ' click' : '');
-    setLab(famLab[k], x, y, `${f.name}<small>${ids.length} territories</small>`, show * quiet, f.ink);
-    { const lw = famLab[k].offsetWidth, lh = famLab[k].offsetHeight; famLab[k].style.left = Math.min(w - lw / 2 - 4, Math.max(lw / 2 + 4, x)) + 'px'; famLab[k].style.top = Math.min(h - lh / 2 - 4, Math.max(lh / 2 + 4, y)) + 'px'; }
+    setCls(famLab[k], 'lab fam' + (show * quiet > .5 ? ' click' : ''));
+    const fh = `${f.name}<small>${ids.length} territories</small>`;
+    if (!(show * quiet)) { setLab(famLab[k], 0, 0, fh, 0); return; }
+    if (famLab[k]._h !== fh) { famLab[k].innerHTML = fh; famLab[k]._h = fh; famLab[k]._sz = null; }
+    const { w: lw, h: lh } = labSize(famLab[k]);
+    setLab(famLab[k], Math.min(w - lw / 2 - 4, Math.max(lw / 2 + 4, x)), Math.min(h - lh / 2 - 4, Math.max(lh / 2 + 4, y)), fh, show * quiet, f.ink);
   });
   // spike view: title at the tip, examples along the crystal
   if (mode.level === 'spike') {
@@ -631,9 +663,10 @@ function updateOverlay(w, h) {
       lines += `<line x1="${x}" y1="${y}" x2="${x}" y2="${ly - 10}" stroke="#26262b" stroke-opacity=".35" stroke-width="1"/><circle cx="${x}" cy="${y}" r="3" fill="#26262b"/>`;
       setLab(ticks[j], x, ly, name, quiet, INK_);
     });
-    under.innerHTML += `<g opacity="${quiet}">${lines}</g>`;
+    lines = `<g opacity="${quiet}">${lines}</g>`; if (linesEl._h !== lines) { linesEl.innerHTML = lines; linesEl._h = lines; }
     for (let j = t.ex.length; j < 6; j++) setLab(ticks[j], 0, 0, '', 0);
-  } else if (mode.level === 'sections') {
+  } else if (linesEl._h) { linesEl.innerHTML = ''; linesEl._h = ''; }
+  if (mode.level === 'sections') {
     setLab(titleLab, 0, 0, '', 0); ticks.forEach(d => setLab(d, 0, 0, '', 0));
   } else { setLab(titleLab, 0, 0, '', 0); ticks.forEach(d => setLab(d, 0, 0, '', 0)); }
   // section labels: years above, titles below
@@ -650,13 +683,13 @@ function updateOverlay(w, h) {
     const [x, y] = P[k], r = seg.rad * pxPerUnit + 14;
     if (vertical()) {
       const lw = Math.max(120, Math.min(220, w - x - r - 12));
-      d.className = 'lab click sl side' + (on ? ' on' : ''); d.style.setProperty('--fc', fam.ink);
+      setCls(d, 'lab click sl side' + (on ? ' on' : '')); d.style.setProperty('--fc', fam.ink);
       setLab(d, x + r, y, `<span class="slw" style="width:${lw}px;text-align:left"><b>${esc(sc.years)}${isTip ? ' · tip' : ''}</b><i>${esc(sc.title.replace(/^Frontier tip:\s*/i, ''))}</i></span>`, 1);
       return;
     }
     const lw = Math.max(110, Math.min(230, slot * 2 - 14));
     const narrow = false;
-    d.className = 'lab click sl' + (above ? ' up' : ' dn') + (on ? ' on' : '');
+    setCls(d, 'lab click sl' + (above ? ' up' : ' dn') + (on ? ' on' : ''));
     d.style.setProperty('--fc', fam.ink);
     setLab(d, Math.min(w - lw / 2 - 6, Math.max(lw / 2 + 6, x)), above ? y - r : y + r,
       `<span class="slw" style="width:${lw}px"><b>${esc(sc.years)}${isTip ? ' · tip' : ''}</b>${narrow ? '' : `<i>${esc(sc.title.replace(/^Frontier tip:\s*/i, ''))}</i>`}</span>`, 1);
@@ -679,16 +712,25 @@ function fitZ() {
 camera.position.z = 21;
 addEventListener('resize', resize); resize(); if (window.ResizeObserver) new ResizeObserver(resize).observe(stage);
 renderChips(); renderPanel(); renderCrumb();
+let lastFrame = 0, wasBusy = true, geoKey = '';
 function frame(now) {
+  const dt = Math.min(50, lastFrame ? now - lastFrame : 16.7); lastFrame = now;
   busy = stepAnim(now);
+  if (!dragging && (vx || vy)) {
+    if (canSpin()) { rotateBy(vx * dt, vy * dt); lastInput = performance.now(); }
+    const k = Math.pow(.92, dt / 16.7); vx *= k; vy *= k;
+    if (Math.abs(vx) + Math.abs(vy) < 2e-5) vx = vy = 0;
+  }
   if (!dragging && !reduce && now - lastInput > 2500 && !hoverFam && hovered < 0 && (mode.level === 'all' || mode.level === 'fam')) {
     spin = Math.min(1, spin + .01);
-    group.quaternion.premultiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(0, .0015 * spin, 0)));
-    qFrom.copy(group.quaternion); qTo.copy(group.quaternion);
+    rotateBy(0, .0015 * spin);
   }
   const zf = fitZ();
   if (isFinite(zf)) camera.position.z = isFinite(camera.position.z) ? camera.position.z + (zf - camera.position.z) * (reduce ? 1 : 0.06) : zf;
-  writeSpikes(); sliceFrame(); group.updateMatrixWorld();
+  const gk = mode.level + '|' + mode.spike + '|' + hovered;
+  if (busy || wasBusy || hlMoving || gk !== geoKey) { writeSpikes(); geoKey = gk; }
+  wasBusy = busy;
+  placeGroup(); sliceFrame(); group.updateMatrixWorld();
   renderer.render(scene, camera);
   updateOverlay(stage.clientWidth, stage.clientHeight);
   if (!CAP) requestAnimationFrame(frame);
