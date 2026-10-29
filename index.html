@@ -87,6 +87,7 @@ aside .count{color:var(--muted);margin:0 0 10px;font-size:13px}
 .note{color:var(--muted);font-size:12px;margin-top:12px}
 @media (max-width:900px){.app{grid-template-columns:minmax(0,1fr);grid-template-rows:none;height:auto;min-height:0}.stage{height:68vh;min-height:420px}aside{max-height:none}}
 @media (max-width:600px){.sub{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.app{padding-block:12px;gap:12px}.stage{height:62vh!important;min-height:380px}.chips{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}.chips::-webkit-scrollbar{display:none}.chip{flex:none}.sub{font-size:13.5px}h1{font-size:22px}}
+@media (pointer:coarse){.lab.click{padding:8px 10px;min-height:32px;display:flex;flex-direction:column;justify-content:center}.chip{padding:10px 14px 10px 11px}.lab.click:active{background:rgba(255,253,248,.9)}}
 @media (prefers-reduced-motion:reduce){.chip,.lab,.tip{transition:none}}
 </style>
 <div class="app">
@@ -352,7 +353,7 @@ let vx = 0, vy = 0, lastMoveT = 0;
 const ROT = 0.008, _q = new THREE.Quaternion(), _e = new THREE.Euler();
 function rotateBy(ax, ay) { group.quaternion.premultiply(_q.setFromEuler(_e.set(ax, ay, 0))); qFrom.copy(group.quaternion); qTo.copy(group.quaternion); }
 const canSpin = () => mode.level === 'all' || mode.level === 'fam';
-cv.addEventListener('pointerdown', e => { if (!e.isPrimary) return; dragging = true; moved = 0; vx = vy = 0; lx = e.clientX; ly = e.clientY; lastMoveT = e.timeStamp; cv.setPointerCapture(e.pointerId); cv.classList.add('dragging'); });
+cv.addEventListener('pointerdown', e => { if (!e.isPrimary) return; dragging = true; moved = 0; vx = vy = 0; lx = e.clientX; ly = e.clientY; lastMoveT = e.timeStamp; try { cv.setPointerCapture(e.pointerId); } catch (_) {} cv.classList.add('dragging'); });
 cv.addEventListener('pointermove', e => {
   if (!e.isPrimary) return;
   if (dragging) {
@@ -383,12 +384,20 @@ function up() {
   else if (mode.level === 'fam') go('all');
 }
 const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+// a fingertip is wider than a thin spike, so touch taps also try a ring of points around the tap
+const TOUCH_RING = [[0, 0], [10, 0], [-10, 0], [0, 10], [0, -10], [18, 0], [-18, 0], [0, 18], [0, -18], [13, 13], [-13, 13], [13, -13], [-13, -13]];
+function rayHit(e, obj, ok) {
+  const r = cv.getBoundingClientRect(), ring = e.pointerType === 'touch' ? TOUCH_RING : [[0, 0]];
+  for (const [ox, oy] of ring) {
+    mouse.set((e.clientX + ox - r.left) / r.width * 2 - 1, -(e.clientY + oy - r.top) / r.height * 2 + 1);
+    ray.setFromCamera(mouse, camera);
+    const hit = ray.intersectObject(obj)[0]; if (hit && ok(hit)) return hit;
+  }
+  return null;
+}
 function pick(e) {
-  const r = cv.getBoundingClientRect();
-  mouse.set((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1);
-  ray.setFromCamera(mouse, camera);
-  const hit = ray.intersectObject(mesh)[0]; if (!hit) return -1;
-  const i = Math.floor(hit.faceIndex / K); return S[i].alpha > .5 ? i : -1;
+  const hit = rayHit(e, mesh, h => S[Math.floor(h.faceIndex / K)].alpha > .5);
+  return hit ? Math.floor(hit.faceIndex / K) : -1;
 }
 const STATUS = { working: 'working at scale', emerging: 'emerging', fringe: 'fringe (mostly research)' };
 function hover(e) {
@@ -435,7 +444,7 @@ function renderCrumb() {
   el.innerHTML = parts.join(' ');
   el.querySelectorAll('button').forEach(b => b.onclick = () => b.dataset.a === 'all' ? go('all') : b.dataset.a === 'spike' ? go('spike', null, mode.spike) : go('fam', fam));
   const T = matchMedia('(hover: none)').matches;
-  document.getElementById('hint').textContent = T ? (mode.level === 'all' ? 'drag sideways to rotate · tap a family to highlight it, tap again to open'
+  document.getElementById('hint').textContent = T ? (mode.level === 'all' ? 'drag to rotate · tap a family to highlight it, tap again to open'
     : mode.level === 'fam' ? 'tap a spike or its name to look closer · tap empty space to go back'
     : mode.level === 'spike' ? 'tap the spike to slice it open · breadcrumb to go back' : 'tap a section · the tip is the newest frontier')
     : mode.level === 'all' ? 'drag to rotate · hover to highlight a family · click to open it'
@@ -560,11 +569,8 @@ function sliceFrame() {
   sliceEdgeGeo.setDrawRange(0, e); sliceEdgeGeo.attributes.position.needsUpdate = sliceEdgeGeo.attributes.color.needsUpdate = true;
 }
 function pickSection(e) {
-  const r = cv.getBoundingClientRect();
-  mouse.set((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1);
-  ray.setFromCamera(mouse, camera);
-  const hit = ray.intersectObject(sliceMesh)[0]; if (!hit) return -1;
-  return Math.floor(hit.faceIndex / STRI);
+  const hit = rayHit(e, sliceMesh, () => true);
+  return hit ? Math.floor(hit.faceIndex / STRI) : -1;
 }
 
 // ================================================================ overlay: soft hull, shadow, labels
